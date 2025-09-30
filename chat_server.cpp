@@ -2,79 +2,72 @@
 #include <iostream>
 #include <WinSock2.h>
 #include <WS2tcpip.h>
-#pragma comment(lib, "Ws2_32.lib")
+#include <thread>
+#include <vector>
+#include <mutex>
 
-using namespace std;
+#pragma comment(lib, "ws2_32.lib")
 
-int main() {
-    WSADATA wsa;
-    SOCKET serverSocket, clientSocket;
-    sockaddr_in serverAddr, clientAddr;
+std::vector<SOCKET> clients;
+std::mutex clientsMutex;
 
-    // Initialize Winsock
-    if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) {
-        cout << "Failed. Error Code: " << WSAGetLastError() << endl;
-        return 1;
-    }
-    cout << "[Server] Winsock initialized.\n";
-
-    // Create socket
-    serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (serverSocket == INVALID_SOCKET) {
-        cout << "Could not create socket: " << WSAGetLastError() << endl;
-        WSACleanup();
-        return 1;
-    }
-    cout << "[Server] Socket created.\n";
-
-    // Setup server address
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = INADDR_ANY;
-    serverAddr.sin_port = htons(54000);
-
-    // Bind
-    if (bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-        cout << "Bind failed: " << WSAGetLastError() << endl;
-        closesocket(serverSocket);
-        WSACleanup();
-        return 1;
-    }
-    cout << "[Server] Bind successful.\n";
-
-    // Listen
-    listen(serverSocket, 1);
-    cout << "[Server] Waiting for client...\n";
-
-    int clientSize = sizeof(clientAddr);
-    clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientSize);
-    if (clientSocket == INVALID_SOCKET) {
-        cout << "Accept failed: " << WSAGetLastError() << endl;
-        closesocket(serverSocket);
-        WSACleanup();
-        return 1;
-    }
-    cout << "[Server] Client connected!\n";
-
+void handleClient(SOCKET clientSocket) {
     char buffer[1024];
     while (true) {
-        ZeroMemory(buffer, sizeof(buffer));
-
-        // Receive message from client
-        int bytesRecv = recv(clientSocket, buffer, sizeof(buffer), 0);
-        if (bytesRecv <= 0) {
-            cout << "[Server] Client disconnected.\n";
+        int bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0);
+        if (bytesReceived <= 0) {
+            std::lock_guard<std::mutex> lock(clientsMutex);
+            closesocket(clientSocket);
+            clients.erase(std::remove(clients.begin(), clients.end(), clientSocket), clients.end());
+            std::cout << "[Server] Client disconnected." << std::endl;
             break;
         }
-        cout << "Client: " << buffer << endl;
 
-        // Send reply
-        cout << "You (Server): ";
-        string reply;
-        getline(cin, reply);
-        send(clientSocket, reply.c_str(), reply.size() + 1, 0);
+        buffer[bytesReceived] = '\0';
+        std::string msg = buffer;
+
+        std::cout << "[Client]: " << msg << std::endl;
+
+        // Broadcast to all other clients
+        std::lock_guard<std::mutex> lock(clientsMutex);
+        for (SOCKET s : clients) {
+            if (s != clientSocket) {
+                send(s, msg.c_str(), msg.size(), 0);
+            }
+        }
+    }
+}
+
+int main() {
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2,2), &wsaData);
+
+    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+
+    sockaddr_in serverAddr;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(54000);
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+
+    bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr));
+    listen(serverSocket, SOMAXCONN);
+
+    std::cout << "[Server] Waiting for clients..." << std::endl;
+
+    while (true) {
+        sockaddr_in clientAddr;
+        int clientSize = sizeof(clientAddr);
+        SOCKET clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientSize);
+
+        {
+            std::lock_guard<std::mutex> lock(clientsMutex);
+            clients.push_back(clientSocket);
+        }
+
+        std::cout << "[Server] New client connected." << std::endl;
+        std::thread(handleClient, clientSocket).detach();
     }
 
-    closesocket(clientSocket);
     closesocket(serverSocket);
     WSACleanup();
     return 0;
